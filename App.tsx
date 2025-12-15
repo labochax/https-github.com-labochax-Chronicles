@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useRef } from "react";
 import { MOCK_EVENTS } from "./services/mockData";
 import { TimelineEvent } from "./components/TimelineEvent";
 import { TimelineModal } from "./components/TimelineModal";
@@ -51,10 +51,19 @@ const LENSES: LensTheme[] = [
     },
 ];
 
+// Slider Levels Configuration
+const ZOOM_LEVELS = [
+    { value: 0, label: "Key", minImportance: 9 },
+    { value: 25, label: "Major", minImportance: 8 },
+    { value: 50, label: "Specific", minImportance: 7 },
+    { value: 75, label: "Detailed", minImportance: 6 },
+    { value: 100, label: "All", minImportance: 1 }
+];
+
 const App: React.FC = () => {
   const mainRef = useRef<HTMLDivElement>(null);
   
-  const [density, setDensity] = useState<number>(30); // 0 (Key) to 100 (All)
+  const [density, setDensity] = useState<number>(25); // Default to "Major"
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedEvent, setSelectedEvent] = useState<HistoricalEvent | null>(null);
   
@@ -71,16 +80,33 @@ const App: React.FC = () => {
   const activeLens = LENSES.find(l => l.id === activeLensId) || LENSES[0];
 
   // Helper: Compute visible events
-  const visibleEvents = useMemo(() => {
-    // If a lens is active (and not 'all'), we naturally want to see more details about that theme,
-    // so we lower the importance threshold (effectively increasing zoom) unless the user manually set density very low.
-    // However, to respect the slider, we calculate normally but user might need to slide up.
-    // Better UX: relying on the slider state but ensuring the filter logic works.
-    
-    const importanceThreshold = 10 - (density / 10); 
+  const { visibleEvents, eraChildCounts } = useMemo(() => {
+    // 1. Determine importance threshold based on density slider
+    // Find the closest zoom level less than or equal to current density
+    const currentLevel = ZOOM_LEVELS.reduce((prev, curr) =>
+        (curr.value <= density && curr.value > prev.value) ? curr : prev
+    , ZOOM_LEVELS[0]);
 
-    return MOCK_EVENTS.filter((event) => {
-        // 1. Search Query (Highest priority)
+    // Logic: If slider is between levels, interpolate or just snap?
+    // Let's use the exact thresholds from our config for simplicity and clarity.
+    // If density is 30, it's > 25 (Major), so we might want to show a bit more?
+    // Actually, simple mapping is better:
+    // 0-24 -> Key (9+)
+    // 25-49 -> Major (8+)
+    // 50-74 -> Specific (7+)
+    // 75-99 -> Detailed (6+)
+    // 100 -> All (1+)
+    
+    let importanceThreshold = 9;
+    if (density >= 100) importanceThreshold = 1;
+    else if (density >= 75) importanceThreshold = 6;
+    else if (density >= 50) importanceThreshold = 7;
+    else if (density >= 25) importanceThreshold = 8;
+    else importanceThreshold = 9;
+
+    // Filter Logic
+    const filtered = MOCK_EVENTS.filter((event) => {
+        // Search Query (Highest priority)
         if (searchQuery.trim().length > 0) {
             const query = searchQuery.toLowerCase();
             const matchesSearch = (
@@ -91,42 +117,47 @@ const App: React.FC = () => {
             if (!matchesSearch) return false;
         }
 
-        // 2. Custom Tag Filter (Overrides Lens)
+        // Custom Tag Filter (Overrides Lens)
         if (activeCustomTag) {
-            // Strict filtering for custom tags. 
-            // We do NOT strictly filter Eras here to allow context, UNLESS the Era itself doesn't match and isn't a parent.
-            // Simplified: If event doesn't have tag, hide it. 
             if (!event.tags.includes(activeCustomTag) && event.type !== EventType.ERA) return false;
-            
-            // For Eras: optionally hide if they really don't match, but keeping them usually looks better.
-            // Let's hide Eras that are completely irrelevant to reduce noise in "Tag Mode".
             if (event.type === EventType.ERA && !event.tags.includes(activeCustomTag)) {
-                // Check if any of its children (by time approx or manual parentId) match? 
-                // Too complex for mock. Simple tag check.
-                // We added tags to Eras in mockData, so this should work better now.
                 return false; 
             }
         } 
-        // 3. Lens Filter
+        // Lens Filter
         else if (activeLens.tags.length > 0) {
             const hasTag = event.tags.some(t => activeLens.tags.includes(t));
-            
-            if (!hasTag) {
-                // If it's an Era, we usually want to keep it for structure, BUT if it's completely unrelated to the theme 
-                // (e.g. "Middle Ages" in a "Cosmic" lens), we should probably hide it.
-                // We updated Mock Data to include relevant tags on Eras.
-                // So now we can strictly filter Eras too.
-                return false;
-            }
+            if (!hasTag) return false;
         }
 
-        // 4. Importance/Density
-        // Eras always show if they passed the filter above
+        // Always show Eras if they pass the tag/lens filter
         if (event.type === EventType.ERA) return true;
         
-        // Check importance
+        // Importance Check
         return event.importance >= importanceThreshold;
     });
+
+    // Calculate Hidden Child Counts for visible Eras
+    const counts: Record<string, number> = {};
+
+    // We only need to do this if we aren't showing "All"
+    if (importanceThreshold > 1) {
+        filtered.forEach(event => {
+            if (event.type === EventType.ERA) {
+                // Find all children of this era in the FULL dataset
+                const allChildren = MOCK_EVENTS.filter(e => e.parentId === event.id);
+                // Count how many are NOT in the filtered list
+                const visibleChildIds = new Set(filtered.map(e => e.id));
+                const hiddenCount = allChildren.filter(child => !visibleChildIds.has(child.id)).length;
+
+                if (hiddenCount > 0) {
+                    counts[event.id] = hiddenCount;
+                }
+            }
+        });
+    }
+
+    return { visibleEvents: filtered, eraChildCounts: counts };
   }, [density, searchQuery, activeLens, activeCustomTag]);
 
   // Extract Top Tags for "Explore" menu
@@ -163,15 +194,14 @@ const App: React.FC = () => {
   const handleSelectLens = (lensId: string) => {
     setActiveLensId(lensId);
     setActiveCustomTag(null); 
-    setTagSearch(""); // Reset tag search
+    setTagSearch("");
     setShowLensMenu(false);
     setSearchQuery('');
     
-    // Auto-adjust density for specific lenses to ensure content is visible
     if (lensId !== 'all') {
-        setDensity(80); 
+        setDensity(75); // "Detailed" view for lenses
     } else {
-        setDensity(30); // Reset to default for 'All'
+        setDensity(25); // "Major" view for generic
     }
 
     if (mainRef.current) {
@@ -195,7 +225,7 @@ const App: React.FC = () => {
     setActiveLensId('all');
     setActiveCustomTag(null);
     setTagSearch("");
-    setDensity(30);
+    setDensity(25);
     setSearchQuery("");
     if (mainRef.current) {
         mainRef.current.scrollTo({ top: 0, behavior: 'smooth' });
@@ -260,7 +290,7 @@ const App: React.FC = () => {
         </div>
 
         {/* Timeline Container */}
-        <div className="relative px-4 pb-36 pt-2 max-w-3xl mx-auto min-h-[50vh]">
+        <div className="relative px-4 pb-48 pt-2 max-w-3xl mx-auto min-h-[50vh]">
           {/* Vertical Line */}
           <div className="absolute left-[34px] md:left-[40px] top-0 bottom-0 w-[2px] timeline-gradient z-0"></div>
 
@@ -284,6 +314,7 @@ const App: React.FC = () => {
                     event={event} 
                     index={index}
                     onSelect={setSelectedEvent}
+                    hiddenChildCount={eraChildCounts[event.id] || 0}
                 />
             ))
           )}
@@ -409,49 +440,61 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Density Slider Controls (Floating) */}
+      {/* Stepped Slider Controls (Floating) */}
       {!showLensMenu && (
-        <div className="fixed left-4 right-4 bottom-24 z-30 max-w-md mx-auto pointer-events-none">
-            <div className="bg-surface-dark/90 backdrop-blur-xl border border-white/10 p-3 rounded-2xl shadow-2xl ring-1 ring-white/5 flex items-center gap-3 animate-slide-up pointer-events-auto">
-            <div className="flex flex-col items-center justify-center w-10 text-text-secondary cursor-pointer" onClick={() => setDensity(0)}>
-                <span className={`material-symbols-outlined text-lg mb-0.5 transition-colors ${density < 20 ? 'text-primary' : ''}`}>star</span>
-                <span className="text-[9px] font-bold uppercase tracking-wide">Key</span>
-            </div>
-            
-            <div className="relative flex-1 h-6 flex items-center">
-                <div className="absolute w-full h-1.5 bg-background-dark rounded-full overflow-hidden">
+        <div className="fixed left-4 right-4 bottom-24 z-30 max-w-lg mx-auto pointer-events-none">
+            <div className="bg-surface-dark/95 backdrop-blur-xl border border-white/10 p-4 rounded-2xl shadow-2xl ring-1 ring-white/5 flex flex-col gap-3 animate-slide-up pointer-events-auto">
+                <div className="flex justify-between items-end px-1">
+                    {ZOOM_LEVELS.map((level) => (
+                        <div
+                            key={level.value}
+                            onClick={() => setDensity(level.value)}
+                            className={`flex flex-col items-center gap-1 cursor-pointer transition-all duration-300 ${
+                                density === level.value ? 'opacity-100 scale-110' : 'opacity-50 hover:opacity-80'
+                            }`}
+                        >
+                            <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                                density === level.value ? 'text-primary' : 'text-text-secondary'
+                            }`}>
+                                {level.label}
+                            </span>
+                            <div className={`w-1 h-2 rounded-full ${
+                                density === level.value ? 'bg-primary h-3' : 'bg-white/20'
+                            }`}></div>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="relative h-6 flex items-center mx-2">
+                    <div className="absolute w-full h-1.5 bg-background-dark rounded-full overflow-hidden">
+                        <div
+                            className="h-full bg-primary transition-all duration-300 ease-out"
+                            style={{ width: `${density}%` }}
+                        ></div>
+                    </div>
+
+                    <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="25"
+                        value={density}
+                        onChange={(e) => setDensity(parseInt(e.target.value))}
+                        className="absolute w-full h-full opacity-0 cursor-pointer z-10"
+                        aria-label="Zoom Level"
+                    />
+
                     <div 
-                        className="h-full bg-primary transition-all duration-100" 
-                        style={{ width: `${density}%` }}
+                        className="absolute size-5 bg-white rounded-full shadow-glow pointer-events-none transition-all duration-300 ease-out border-2 border-primary"
+                        style={{ left: `calc(${density}% - 10px)` }}
                     ></div>
                 </div>
-                
-                <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={density}
-                    onChange={(e) => setDensity(parseInt(e.target.value))}
-                    className="absolute w-full h-full opacity-0 cursor-pointer z-10"
-                    aria-label="Zoom Level"
-                />
-                
-                <div 
-                    className="absolute size-4 bg-white rounded-full shadow-glow pointer-events-none transition-all duration-100"
-                    style={{ left: `calc(${density}% - 8px)` }}
-                ></div>
-            </div>
-
-            <div className="flex flex-col items-center justify-center w-10 text-text-secondary cursor-pointer" onClick={() => setDensity(100)}>
-                <span className={`material-symbols-outlined text-lg mb-0.5 transition-colors ${density > 80 ? 'text-primary' : ''}`}>grain</span>
-                <span className="text-[9px] font-bold uppercase tracking-wide">All</span>
-            </div>
             </div>
         </div>
       )}
 
       {/* Floating Action Button (Shuffle) */}
-      <div className="fixed right-4 bottom-48 z-30 md:right-8">
+      <div className="fixed right-4 bottom-52 z-30 md:right-8">
         <button 
             onClick={handleShuffle}
             className="flex items-center justify-center size-14 rounded-full bg-gradient-to-tr from-primary to-primary-glow text-white shadow-glow hover:shadow-glow-lg transition-all hover:scale-110 active:scale-95 group"
