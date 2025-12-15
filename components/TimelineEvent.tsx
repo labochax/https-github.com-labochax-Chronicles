@@ -5,9 +5,10 @@ interface TimelineEventProps {
   event: HistoricalEvent;
   onSelect: (event: HistoricalEvent) => void;
   index: number;
+  hiddenChildCount?: number;
 }
 
-export const TimelineEvent: React.FC<TimelineEventProps> = ({ event, onSelect }) => {
+export const TimelineEvent: React.FC<TimelineEventProps> = ({ event, onSelect, hiddenChildCount = 0 }) => {
   const isEra = event.type === EventType.ERA;
   const isSubEvent = event.type === EventType.SUB_EVENT;
 
@@ -38,6 +39,19 @@ export const TimelineEvent: React.FC<TimelineEventProps> = ({ event, onSelect })
           <p className="text-text-secondary/70 text-xs mt-2 line-clamp-2">
             {event.description}
           </p>
+
+          {/* CLUSTERING: Show hidden child count if > 0 */}
+          {hiddenChildCount > 0 && (
+            <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 w-fit animate-pulse">
+                <span className="material-symbols-outlined text-primary text-sm">layers</span>
+                <span className="text-xs text-white font-medium">
+                    Contains {hiddenChildCount} more events
+                </span>
+                <span className="text-[10px] text-text-secondary uppercase tracking-wide ml-1">
+                    (Zoom to see)
+                </span>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -97,6 +111,19 @@ export const TimelineEvent: React.FC<TimelineEventProps> = ({ event, onSelect })
             {event.description}
           </p>
           
+          {/* Source Link */}
+          {event.sourceUrl && (
+             <a
+                href={event.sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="text-xs text-primary hover:text-primary-glow hover:underline flex items-center gap-1 w-fit mt-1"
+             >
+                Read more <span className="material-symbols-outlined text-[10px]">open_in_new</span>
+             </a>
+          )}
+
           <div className="flex flex-wrap gap-2 mt-2">
             {event.tags.map((tag) => (
               <span
